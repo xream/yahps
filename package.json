@@ -1,0 +1,19 @@
+{
+  "name": "yahps",
+  "module": "index.ts",
+  "type": "module",
+  "version": "1.0.0",
+  "license": "GPL-3.0",
+  "author": "xream",
+  "scripts": {
+    "dev": "bun run index.ts",
+    "start": "bun run index.ts",
+    "build": "bun build --compile index.ts --outfile dist/yahps"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
