@@ -8,6 +8,10 @@ https://你的域名/https://目标域名/path?a=1
 
 实际请求会被转发为 `https://目标域名/path?a=1`。
 
+本项目为纯 AI 辅助实验品，仅供学习交流使用，请勿用于商业用途。
+
+没有缓存等功能，仅做最简单的请求转发。
+
 ## 配置
 
 默认会读取「可执行文件同目录」下的 `config.js`。如果需要自定义路径，
@@ -32,6 +36,23 @@ export default {
 
 - 先匹配 denylist，命中则直接拒绝
 - 如果 allowlist 非空，目标 URL 必须至少命中一条 allow 规则
+
+GitHub 相关资源可参考:
+
+```js
+export default {
+  allowlist: [
+    /^https?:\/\/github\.com\//,
+    /^https?:\/\/raw\.github\.com\//,
+    /^https?:\/\/raw\.githubusercontent\.com\//,
+    /^https?:\/\/gist\.github\.com\//,
+    /^https?:\/\/objects\.githubusercontent\.com\//,
+    /^https?:\/\/gist\.githubusercontent\.com\//,
+    /^https?:\/\/codeload\.github\.com\//,
+    /^https?:\/\/api\.github\.com\//,
+  ],
+};
+```
 
 ## systemd 示例
 
