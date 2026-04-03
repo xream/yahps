@@ -48,6 +48,7 @@ export default {
     /^https?:\/\/gist\.github\.com\//,
     /^https?:\/\/objects\.githubusercontent\.com\//,
     /^https?:\/\/gist\.githubusercontent\.com\//,
+    /^https?:\/\/avatars\.githubusercontent\.com\//,
     /^https?:\/\/codeload\.github\.com\//,
     /^https?:\/\/api\.github\.com\//,
   ],
