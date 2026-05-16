@@ -8,11 +8,6 @@ on:
       - main
     paths:
       - "package.json"
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "package.json"
 
 jobs:
   build:
@@ -31,8 +26,8 @@ jobs:
           bun install
       - name: Bundle
         run: |
-          bun build index.js --compile --outfile yahps-linux-x64 --target=bun-linux-x64
-          bun build index.js --compile --outfile yahps-linux-arm64 --target=bun-linux-arm64
+          bun build index.ts --compile --outfile yahps-linux-x64 --target=bun-linux-x64
+          bun build index.ts --compile --outfile yahps-linux-arm64 --target=bun-linux-arm64
       - id: tag
         name: Generate release tag
         run: |
