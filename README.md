@@ -86,8 +86,19 @@ export default {
     /^https?:\/\/objects\.githubusercontent\.com\//,
     /^https?:\/\/gist\.githubusercontent\.com\//,
     /^https?:\/\/avatars\.githubusercontent\.com\//,
+    /^https?:\/\/release-assets\.githubusercontent\.com\//,
     /^https?:\/\/codeload\.github\.com\//,
     /^https?:\/\/api\.github\.com\//,
+  ],
+};
+```
+
+宽松
+
+```js
+export default {
+  allowlist: [
+    /^(https?:\/\/)(?:[\w-]+\.)*(?:github\.com|githubusercontent\.com)(?:\/|$)/i,
   ],
 };
 ```
