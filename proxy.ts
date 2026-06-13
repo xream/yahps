@@ -50,6 +50,7 @@ const DISALLOWED_LOCAL_REJECTION_HEADERS = new Set([
   ...HOP_BY_HOP_HEADERS,
   "content-encoding",
 ]);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export async function loadConfig(configPath: string): Promise<ProxyConfig> {
   if (!existsSync(configPath)) {
@@ -194,6 +195,10 @@ function safeDecode(value: string): string {
   }
 }
 
+function isSupportedTargetProtocol(targetUrl: URL): boolean {
+  return targetUrl.protocol === "http:" || targetUrl.protocol === "https:";
+}
+
 function targetPathFromProxyPath(pathname: string, proxyPath: string): string | undefined {
   if (proxyPath === "/") {
     return pathname.replace(/^\/+/, "");
@@ -322,6 +327,58 @@ function localRejectionResponse(
   );
 }
 
+function redirectTargetFromResponse(response: Response, currentTargetUrl: URL): URL | undefined {
+  if (!REDIRECT_STATUSES.has(response.status)) {
+    return undefined;
+  }
+
+  const location = response.headers.get("location");
+  if (!location) {
+    return undefined;
+  }
+
+  try {
+    return new URL(location, currentTargetUrl);
+  } catch {
+    return undefined;
+  }
+}
+
+function proxiedTargetLocation(targetUrl: URL, proxyPath: string): string {
+  const basePath = proxyPath === "/" ? "" : proxyPath;
+  return `${basePath}/${targetUrl.href}`;
+}
+
+function proxiedUpstreamResponse(
+  upstream: Response,
+  targetUrl: URL,
+  locationOverride?: string,
+): Response {
+  const responseHeaders = new Headers(upstream.headers);
+  // Bun fetch may decompress; remove encoding/length headers to prevent mismatch.
+  responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-length");
+  responseHeaders.delete("transfer-encoding");
+  if (locationOverride) {
+    responseHeaders.set("location", locationOverride);
+  }
+  responseHeaders.set("x-proxy-target", targetUrl.href);
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: responseHeaders,
+  });
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Best-effort cleanup only; redirect handling should not fail because cancel failed.
+  }
+}
+
 export function createProxyFetchHandler(
   config: NormalizedProxyConfig,
   options: ProxyFetchHandlerOptions = {},
@@ -402,19 +459,47 @@ export function createProxyFetchHandler(
         redirect: "manual",
       });
 
-      const responseHeaders = new Headers(upstream.headers);
-      // Bun fetch may decompress; remove encoding/length headers to prevent mismatch.
-      responseHeaders.delete("content-encoding");
-      responseHeaders.delete("content-length");
-      responseHeaders.delete("transfer-encoding");
-      responseHeaders.set("x-proxy-target", targetUrl.href);
+      const redirectTargetUrl = redirectTargetFromResponse(upstream, targetUrl);
+      if (!redirectTargetUrl) {
+        logRequest(upstream.status, "upstream", targetUrl);
+        return proxiedUpstreamResponse(upstream, targetUrl);
+      }
 
-      logRequest(upstream.status, "upstream", targetUrl);
-      return new Response(upstream.body, {
-        status: upstream.status,
-        statusText: upstream.statusText,
-        headers: responseHeaders,
-      });
+      if (!isSupportedTargetProtocol(redirectTargetUrl)) {
+        await cancelResponseBody(upstream);
+        const response = localRejectionResponse(
+          config,
+          400,
+          "Target URL must start with http:// or https://.",
+        );
+        logRequest(response.status, "unsupported_redirect_scheme", redirectTargetUrl);
+        return response;
+      }
+
+      const redirectAllowed = isTargetAllowed(
+        redirectTargetUrl,
+        config.allowlist,
+        config.denylist,
+      );
+      if (!redirectAllowed.allowed) {
+        await cancelResponseBody(upstream);
+        const response = localRejectionResponse(
+          config,
+          403,
+          redirectAllowed.reason ?? "Forbidden.",
+        );
+        logRequest(response.status, redirectAllowed.reason ?? "forbidden_redirect", redirectTargetUrl);
+        return response;
+      }
+
+      const rewrittenLocation = proxiedTargetLocation(redirectTargetUrl, config.proxyPath);
+      logRequest(
+        upstream.status,
+        "redirect_rewrite",
+        targetUrl,
+        `location=${JSON.stringify(rewrittenLocation)}`,
+      );
+      return proxiedUpstreamResponse(upstream, targetUrl, rewrittenLocation);
     } catch (fetchError) {
       const message = fetchError instanceof Error ? fetchError.message : String(fetchError);
       logRequest(502, "upstream_error", targetUrl);

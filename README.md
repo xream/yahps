@@ -48,6 +48,9 @@ export default {
 - 配置 `proxyPath` 后，请求必须使用 `/<proxyPath>/https://目标域名/path` 形式
 - 先匹配 denylist，命中则直接拒绝
 - 如果 allowlist 非空，目标 URL 必须至少命中一条 allow 规则
+- 上游 30x 响应带有可解析的 `Location` 时，yahps 会先对 redirect destination
+  执行相同的 URL allowlist/denylist 规则；允许后会把 `Location` 改写成当前
+  `proxyPath` 下的 yahps URL 并返回 30x，拒绝时返回本地拒绝响应
 - `userAgentDenylist` 和 `userAgentAllowlist` 可选，用于按 `User-Agent` 请求头配置正则规则
 - `User-Agent` 规则同样先匹配 denylist；如果 `userAgentAllowlist` 非空，请求的
   `User-Agent` 必须至少命中一条 allow 规则
@@ -67,6 +70,11 @@ export default {
 - 更通用的 `localRejectionResponse` 响应体，例如返回普通的 `404 Not Found`
 
 GitHub 相关资源可参考:
+
+GitHub archive 下载通常会从 `github.com` 30x 跳转到 `codeload.github.com`。
+如果只允许 `github.com`，yahps 会在改写 `codeload.github.com` 的 `Location` 前拒绝它；
+因此两者都需要放进 allowlist。允许后，客户端看到的会是 yahps URL，而不是原始
+`https://codeload.github.com/...`。
 
 ```js
 export default {

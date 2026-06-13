@@ -455,4 +455,294 @@ describe("createProxyFetchHandler", () => {
     expect(response.headers.has("content-encoding")).toBe(false);
     expect(response.headers.has("content-length")).toBe(false);
   });
+
+  test("rewrites allowed redirect locations to the configured proxy path", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler(
+      {
+        proxyPath: "/yahps",
+        allowlist: [
+          /^https:\/\/github\.com\/owner\/repo\/archive\//,
+          /^https:\/\/github\.com\/owner\/repo\/releases\//,
+        ],
+      },
+      async (input) => {
+        seenTargets.push(input.toString());
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://github.com/owner/repo/releases/download/v1/file.zip",
+          },
+        });
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/yahps/https://github.com/owner/repo/archive/refs/heads/main.zip"),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "/yahps/https://github.com/owner/repo/releases/download/v1/file.zip",
+    );
+    expect(response.headers.get("x-proxy-target")).toBe(
+      "https://github.com/owner/repo/archive/refs/heads/main.zip",
+    );
+    expect(seenTargets).toEqual([
+      "https://github.com/owner/repo/archive/refs/heads/main.zip",
+    ]);
+  });
+
+  test("rewrites allowed codeload redirects instead of exposing the upstream location", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler(
+      {
+        allowlist: [
+          /^https:\/\/github\.com\//,
+          /^https:\/\/codeload\.github\.com\//,
+        ],
+      },
+      async (input) => {
+        seenTargets.push(input.toString());
+
+        if (input.toString() === "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip") {
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: "https://codeload.github.com/MetaCubeX/metacubexd/zip/refs/heads/gh-pages",
+            },
+          });
+        }
+
+        throw new Error(`unexpected fetch: ${input.toString()}`);
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "/https://codeload.github.com/MetaCubeX/metacubexd/zip/refs/heads/gh-pages",
+    );
+    expect(response.headers.get("x-proxy-target")).toBe(
+      "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
+    );
+    expect(seenTargets).toEqual([
+      "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
+    ]);
+  });
+
+  test("resolves and rewrites relative redirect locations against the current target", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler({}, async (input) => {
+      seenTargets.push(input.toString());
+
+      if (input.toString() === "https://example.com/downloads/archive.zip") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "../files/archive.zip",
+          },
+        });
+      }
+
+      throw new Error(`unexpected fetch: ${input.toString()}`);
+    });
+
+    const response = await handler(
+      new Request("http://proxy.test/https://example.com/downloads/archive.zip"),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/https://example.com/files/archive.zip");
+    expect(response.headers.get("x-proxy-target")).toBe("https://example.com/downloads/archive.zip");
+    expect(seenTargets).toEqual([
+      "https://example.com/downloads/archive.zip",
+    ]);
+  });
+
+  test("keeps redirect responses with missing or malformed Location headers", async () => {
+    const missingLocationHandler = createHandler({}, async () =>
+      new Response("missing location", {
+        status: 302,
+      }),
+    );
+    const malformedLocationHandler = createHandler({}, async () =>
+      new Response("malformed location", {
+        status: 302,
+        headers: {
+          location: "https://[invalid",
+        },
+      }),
+    );
+
+    const missingLocationResponse = await missingLocationHandler(
+      new Request("http://proxy.test/https://example.com/missing-location"),
+    );
+    const malformedLocationResponse = await malformedLocationHandler(
+      new Request("http://proxy.test/https://example.com/malformed-location"),
+    );
+
+    expect(missingLocationResponse.status).toBe(302);
+    expect(await responseText(missingLocationResponse)).toBe("missing location");
+    expect(malformedLocationResponse.status).toBe(302);
+    expect(await responseText(malformedLocationResponse)).toBe("malformed location");
+  });
+
+  test("rejects redirect targets that miss allowlist without fetching them", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler(
+      {
+        allowlist: [/^https:\/\/allowed\.example\//],
+        localRejectionResponse: {
+          status: 404,
+          body: "Not Found.",
+        },
+      },
+      async (input) => {
+        seenTargets.push(input.toString());
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://blocked.example/file.zip",
+          },
+        });
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/https://allowed.example/file.zip"),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await responseText(response)).toBe("Not Found.");
+    expect(seenTargets).toEqual(["https://allowed.example/file.zip"]);
+  });
+
+  test("rejects redirect targets that match denylist without fetching them", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler(
+      {
+        denylist: [/^https:\/\/blocked\.example\//],
+      },
+      async (input) => {
+        seenTargets.push(input.toString());
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://blocked.example/file.zip",
+          },
+        });
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/https://allowed.example/file.zip"),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await responseText(response)).toBe("Blocked by denylist.");
+    expect(seenTargets).toEqual(["https://allowed.example/file.zip"]);
+  });
+
+  test("rejects redirect targets with unsupported schemes without fetching them", async () => {
+    const seenTargets: string[] = [];
+    const handler = createHandler(
+      {
+        localRejectionResponse: {
+          status: 418,
+          body: "Use HTTP.",
+        },
+      },
+      async (input) => {
+        seenTargets.push(input.toString());
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "ftp://example.com/file.zip",
+          },
+        });
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/https://allowed.example/file.zip"),
+    );
+
+    expect(response.status).toBe(418);
+    expect(await responseText(response)).toBe("Use HTTP.");
+    expect(seenTargets).toEqual(["https://allowed.example/file.zip"]);
+  });
+
+  test("rewrites one redirect hop per request", async () => {
+    let fetchCount = 0;
+    const handler = createHandler({}, async () => {
+      fetchCount += 1;
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://example.com/loop",
+        },
+      });
+    });
+
+    const response = await handler(new Request("http://proxy.test/https://example.com/loop"));
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/https://example.com/loop");
+    expect(fetchCount).toBe(1);
+  });
+
+  test("rewrites HEAD redirects without adding a body", async () => {
+    const methods: string[] = [];
+    const handler = createHandler({}, async (input, init) => {
+      methods.push(init?.method ?? "");
+
+      if (input.toString() === "https://example.com/archive.zip") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://example.com/final.zip",
+          },
+        });
+      }
+
+      throw new Error(`unexpected fetch: ${input.toString()}`);
+    });
+
+    const response = await handler(
+      new Request("http://proxy.test/https://example.com/archive.zip", { method: "HEAD" }),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/https://example.com/final.zip");
+    expect(await responseText(response)).toBe("");
+    expect(methods).toEqual(["HEAD"]);
+  });
+
+  test("rewrites non-GET and non-HEAD redirects without replaying the request body", async () => {
+    let fetchCount = 0;
+    const handler = createHandler({}, async () => {
+      fetchCount += 1;
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://example.com/final",
+        },
+      });
+    });
+
+    const response = await handler(
+      new Request("http://proxy.test/https://example.com/post", {
+        method: "POST",
+        body: "payload",
+      }),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/https://example.com/final");
+    expect(fetchCount).toBe(1);
+  });
 });
