@@ -4,6 +4,7 @@ export default {
   denylist: [],
   userAgentAllowlist: [],
   userAgentDenylist: [],
+  requestHeaderRules: [],
   localRejectionResponse: {
     status: 404,
     body: "Not Found.",

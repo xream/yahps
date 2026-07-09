@@ -2,8 +2,8 @@
   "name": "yahps",
   "module": "index.ts",
   "type": "module",
-  "version": "1.3.0",
-  "license": "GPL-3.0",
+  "version": "1.4.0",
+  "license": "AGPL-3.0-only",
   "author": "xream",
   "scripts": {
     "dev": "bun run index.ts",

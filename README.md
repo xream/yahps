@@ -32,6 +32,16 @@ export default {
   denylist: [/^https:\/\/example\.com\/private/],
   userAgentAllowlist: [/^Mozilla\//],
   userAgentDenylist: [/bot/i],
+  requestHeaderRules: [
+    {
+      url: /^https:\/\/example\.com\/api\//,
+      methods: ["GET"],
+      overrideClientHeaders: false,
+      headers: {
+        "x-custom": "value",
+      },
+    },
+  ],
   localRejectionResponse: {
     status: 404,
     body: "Not Found.",
@@ -54,6 +64,12 @@ export default {
 - `userAgentDenylist` 和 `userAgentAllowlist` 可选，用于按 `User-Agent` 请求头配置正则规则
 - `User-Agent` 规则同样先匹配 denylist；如果 `userAgentAllowlist` 非空，请求的
   `User-Agent` 必须至少命中一条 allow 规则
+- `requestHeaderRules` 可选，用于给转发到上游的请求添加自定义请求头
+- 每条 `requestHeaderRules` 规则都必须同时匹配 `url` 正则和 `methods` 数组才会添加请求头
+- 多条 `requestHeaderRules` 命中同一个请求时按配置顺序应用；配置规则之间的同名请求头以后面的规则为准
+- `requestHeaderRules.overrideClientHeaders` 可选，默认 `false`，表示本条规则不会覆盖客户端同名请求头；设为 `true` 时配置里的同名请求头会覆盖客户端传入的请求头
+- `requestHeaderRules.headers` 不能配置 hop-by-hop、body framing/encoding 或 yahps 管理的 forwarding 请求头，例如
+  `connection`、`transfer-encoding`、`content-length`、`accept-encoding`、`content-encoding`、`host`、`x-forwarded-host`、`x-forwarded-proto`
 - `localRejectionResponse` 可选，用于配置 yahps 本地拒绝请求时返回的状态码和响应体
 - `localRejectionResponse.status` 必须是 `200` 到 `599` 之间的整数，`body` 必须是字符串
 - `localRejectionResponse.headers` 可选，用于配置本地拒绝响应头
@@ -99,6 +115,37 @@ export default {
 export default {
   allowlist: [
     /^(https?:\/\/)(?:[\w-]+\.)*(?:github\.com|githubusercontent\.com)(?:\/|$)/i,
+  ],
+};
+```
+
+如果需要拉取 GitHub 私库资源，或减少未认证请求遇到 `429` 的概率，可以只给
+GitHub 的 `GET` 静态资源请求加 token。不要把 token 写进配置文件，建议从环境变量读取；
+下面示例会在没有 `GITHUB_TOKEN` 时不添加这条规则。
+
+> [!CAUTION]
+> 如果公开使用 yahps，请仔细限制 GitHub token 权限和 `requestHeaderRules.url` 范围。
+> 别人通过你的代理访问匹配的 GitHub URL 时，会使用这个 token 发起上游请求；
+> 如果 token 能访问私库或敏感资源，可能带来隐私泄露风险。
+
+```js
+export default {
+  allowlist: [
+    /^(https?:\/\/)(?:[\w-]+\.)*(?:github\.com|githubusercontent\.com)(?:\/|$)/i,
+  ],
+  requestHeaderRules: [
+    ...(process.env.GITHUB_TOKEN
+      ? [
+          {
+            url: /^(https?:\/\/)(?:[\w-]+\.)*(?:github\.com|githubusercontent\.com)(?:\/|$)/i,
+            methods: ["GET"],
+            overrideClientHeaders: false,
+            headers: {
+              authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+            },
+          },
+        ]
+      : []),
   ],
 };
 ```

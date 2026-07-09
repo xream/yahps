@@ -62,6 +62,32 @@ describe("normalizeConfig", () => {
     const config = normalizeConfig({});
 
     expect(config.localRejectionResponse).toBeUndefined();
+    expect(config.requestHeaderRules).toEqual([]);
+  });
+
+  test("normalizes valid request header rules", () => {
+    const config = normalizeConfig({
+      requestHeaderRules: [
+        {
+          url: "^https://example\\.com/",
+          methods: ["get", "HEAD"],
+          overrideClientHeaders: false,
+          headers: {
+            Authorization: "Bearer token",
+            "X-Custom": "ok",
+          },
+        },
+      ],
+    });
+
+    expect(config.requestHeaderRules).toHaveLength(1);
+    expect(config.requestHeaderRules[0]?.url.test("https://example.com/file")).toBe(true);
+    expect(config.requestHeaderRules[0]?.methods).toEqual(["GET", "HEAD"]);
+    expect(config.requestHeaderRules[0]?.overrideClientHeaders).toBe(false);
+    expect(config.requestHeaderRules[0]?.headers).toEqual({
+      authorization: "Bearer token",
+      "x-custom": "ok",
+    });
   });
 
   test("rejects invalid local rejection response status", () => {
@@ -139,6 +165,109 @@ describe("normalizeConfig", () => {
         },
       }),
     ).toThrow(/hop-by-hop, framing, and encoding headers/);
+  });
+
+  test("rejects invalid request header rules", () => {
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: null,
+      } as unknown as ProxyConfig),
+    ).toThrow(/Invalid requestHeaderRules/);
+
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: [
+          {
+            url: "[",
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      }),
+    ).toThrow(/Invalid requestHeaderRules url/);
+
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com/,
+            methods: [],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      }),
+    ).toThrow(/Invalid requestHeaderRules methods/);
+
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com/,
+            methods: ["GET"],
+            headers: {
+              authorization: 123,
+            },
+          },
+        ],
+      } as unknown as ProxyConfig),
+    ).toThrow(/Invalid requestHeaderRules header/);
+
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com/,
+            methods: ["GET"],
+            headers: {},
+          },
+        ],
+      }),
+    ).toThrow(/Invalid requestHeaderRules headers/);
+
+    expect(() =>
+      normalizeConfig({
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com/,
+            methods: ["GET"],
+            overrideClientHeaders: "no",
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      } as unknown as ProxyConfig),
+    ).toThrow(/Invalid requestHeaderRules overrideClientHeaders/);
+  });
+
+  test("rejects unsafe request headers", () => {
+    for (const header of [
+      "host",
+      "content-length",
+      "transfer-encoding",
+      "accept-encoding",
+      "content-encoding",
+      "x-forwarded-host",
+      "x-forwarded-proto",
+    ]) {
+      expect(() =>
+        normalizeConfig({
+          requestHeaderRules: [
+            {
+              url: /^https:\/\/example\.com/,
+              methods: ["GET"],
+              headers: {
+                [header]: "bad",
+              },
+            },
+          ],
+        }),
+      ).toThrow(/hop-by-hop, framing, and encoding headers/);
+    }
   });
 });
 
@@ -454,6 +583,249 @@ describe("createProxyFetchHandler", () => {
     expect(response.headers.get("x-proxy-target")).toBe("https://example.com/ok");
     expect(response.headers.has("content-encoding")).toBe(false);
     expect(response.headers.has("content-length")).toBe(false);
+  });
+
+  test("adds configured request headers for matching URL and method", async () => {
+    let seenHeaders: Headers | undefined;
+    const handler = createHandler(
+      {
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/github\.com\/owner\/repo\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      },
+      async (_input, init) => {
+        seenHeaders = new Headers(init?.headers);
+        return new Response("proxied");
+      },
+    );
+
+    const response = await handler(
+      new Request("http://proxy.test/https://github.com/owner/repo/archive.zip"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(seenHeaders?.get("authorization")).toBe("Bearer token");
+  });
+
+  test("does not add configured request headers unless URL and method both match", async () => {
+    const seen: Array<string | null> = [];
+    const handler = createHandler(
+      {
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/github\.com\/owner\/repo\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      },
+      async (_input, init) => {
+        seen.push(new Headers(init?.headers).get("authorization"));
+        return new Response("proxied");
+      },
+    );
+
+    await handler(
+      new Request("http://proxy.test/https://github.com/owner/repo/archive.zip", {
+        method: "POST",
+      }),
+    );
+    await handler(new Request("http://proxy.test/https://example.com/archive.zip"));
+
+    expect(seen).toEqual([null, null]);
+  });
+
+  test("keeps request header URL regexes stable across repeated requests", async () => {
+    const seen: Array<string | null> = [];
+    const handler = createHandler(
+      {
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com\//g,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      },
+      async (_input, init) => {
+        seen.push(new Headers(init?.headers).get("authorization"));
+        return new Response("proxied");
+      },
+    );
+
+    await handler(new Request("http://proxy.test/https://example.com/one"));
+    await handler(new Request("http://proxy.test/https://example.com/two"));
+
+    expect(seen).toEqual(["Bearer token", "Bearer token"]);
+  });
+
+  test("applies matching request header rules in order", async () => {
+    let seenHeaders: Headers | undefined;
+    const handler = createHandler(
+      {
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            overrideClientHeaders: true,
+            headers: {
+              authorization: "Bearer first",
+              "x-one": "1",
+            },
+          },
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer second",
+            },
+          },
+        ],
+      },
+      async (_input, init) => {
+        seenHeaders = new Headers(init?.headers);
+        return new Response("proxied");
+      },
+    );
+
+    await handler(
+      new Request("http://proxy.test/https://example.com/file", {
+        headers: {
+          authorization: "Bearer client",
+        },
+      }),
+    );
+
+    expect(seenHeaders?.get("authorization")).toBe("Bearer second");
+    expect(seenHeaders?.get("x-one")).toBe("1");
+  });
+
+  test("keeps client request headers by default", async () => {
+    let seenHeaders: Headers | undefined;
+    const handler = createHandler(
+      {
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer config",
+              "x-from-config": "1",
+            },
+          },
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            headers: {
+              "x-rule-order": "first",
+            },
+          },
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            headers: {
+              "x-rule-order": "second",
+            },
+          },
+        ],
+      },
+      async (_input, init) => {
+        seenHeaders = new Headers(init?.headers);
+        return new Response("proxied");
+      },
+    );
+
+    await handler(
+      new Request("http://proxy.test/https://example.com/file", {
+        headers: {
+          Authorization: "Bearer client",
+        },
+      }),
+    );
+
+    expect(seenHeaders?.get("authorization")).toBe("Bearer client");
+    expect(seenHeaders?.get("x-from-config")).toBe("1");
+    expect(seenHeaders?.get("x-rule-order")).toBe("second");
+  });
+
+  test("does not apply request header rules to locally rejected requests", async () => {
+    let fetchCalled = false;
+    const handler = createHandler(
+      {
+        denylist: [/^https:\/\/example\.com\/private/],
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/example\.com\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      },
+      async () => {
+        fetchCalled = true;
+        return new Response("proxied");
+      },
+    );
+
+    const response = await handler(new Request("http://proxy.test/https://example.com/private"));
+
+    expect(response.status).toBe(403);
+    expect(fetchCalled).toBe(false);
+  });
+
+  test("applies request header rules independently for rewritten redirect targets", async () => {
+    const seen: Array<[string, string | null]> = [];
+    const handler = createHandler(
+      {
+        allowlist: [
+          /^https:\/\/github\.com\//,
+          /^https:\/\/codeload\.github\.com\//,
+        ],
+        requestHeaderRules: [
+          {
+            url: /^https:\/\/codeload\.github\.com\//,
+            methods: ["GET"],
+            headers: {
+              authorization: "Bearer token",
+            },
+          },
+        ],
+      },
+      async (input, init) => {
+        seen.push([input.toString(), new Headers(init?.headers).get("authorization")]);
+
+        if (input.toString() === "https://github.com/owner/repo/archive.zip") {
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: "https://codeload.github.com/owner/repo/zip/main",
+            },
+          });
+        }
+
+        return new Response("zip");
+      },
+    );
+
+    await handler(new Request("http://proxy.test/https://github.com/owner/repo/archive.zip"));
+    await handler(new Request("http://proxy.test/https://codeload.github.com/owner/repo/zip/main"));
+
+    expect(seen).toEqual([
+      ["https://github.com/owner/repo/archive.zip", null],
+      ["https://codeload.github.com/owner/repo/zip/main", "Bearer token"],
+    ]);
   });
 
   test("rewrites allowed redirect locations to the configured proxy path", async () => {

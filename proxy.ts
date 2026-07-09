@@ -8,13 +8,28 @@ export type LocalRejectionResponseConfig = {
   headers?: Record<string, string>;
 };
 
+export type RequestHeaderRuleConfig = {
+  url: string | RegExp;
+  methods: string[];
+  overrideClientHeaders?: boolean;
+  headers: Record<string, string>;
+};
+
 export type ProxyConfig = {
   proxyPath?: string;
   allowlist?: Array<string | RegExp>;
   denylist?: Array<string | RegExp>;
   userAgentAllowlist?: Array<string | RegExp>;
   userAgentDenylist?: Array<string | RegExp>;
+  requestHeaderRules?: RequestHeaderRuleConfig[];
   localRejectionResponse?: LocalRejectionResponseConfig;
+};
+
+export type NormalizedRequestHeaderRule = {
+  url: RegExp;
+  methods: string[];
+  overrideClientHeaders: boolean;
+  headers: Record<string, string>;
 };
 
 export type NormalizedProxyConfig = {
@@ -23,6 +38,7 @@ export type NormalizedProxyConfig = {
   denylist: RegExp[];
   userAgentAllowlist: RegExp[];
   userAgentDenylist: RegExp[];
+  requestHeaderRules: NormalizedRequestHeaderRule[];
   localRejectionResponse?: LocalRejectionResponseConfig;
 };
 
@@ -50,6 +66,13 @@ const DISALLOWED_LOCAL_REJECTION_HEADERS = new Set([
   ...HOP_BY_HOP_HEADERS,
   "content-encoding",
 ]);
+const DISALLOWED_REQUEST_HEADERS = new Set([
+  ...HOP_BY_HOP_HEADERS,
+  "accept-encoding",
+  "content-encoding",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export async function loadConfig(configPath: string): Promise<ProxyConfig> {
@@ -74,6 +97,7 @@ export function normalizeConfig(config: ProxyConfig): NormalizedProxyConfig {
     denylist: compileRegexList(config.denylist, "denylist"),
     userAgentAllowlist: compileRegexList(config.userAgentAllowlist, "userAgentAllowlist"),
     userAgentDenylist: compileRegexList(config.userAgentDenylist, "userAgentDenylist"),
+    requestHeaderRules: normalizeRequestHeaderRules(config.requestHeaderRules),
     localRejectionResponse: normalizeLocalRejectionResponse(config.localRejectionResponse),
   };
 }
@@ -117,6 +141,118 @@ function compileRegexList(
       throw new Error(`Invalid ${label} regex "${pattern}": ${message}`);
     }
   });
+}
+
+function compileRegex(pattern: string | RegExp, label: string): RegExp {
+  if (pattern instanceof RegExp) {
+    return pattern;
+  }
+  if (typeof pattern !== "string") {
+    throw new Error(`Invalid ${label}: expected a string or RegExp.`);
+  }
+
+  try {
+    return new RegExp(pattern);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid ${label} regex "${pattern}": ${message}`);
+  }
+}
+
+function normalizeRequestHeaderRules(
+  rules: ProxyConfig["requestHeaderRules"],
+): NormalizedRequestHeaderRule[] {
+  if (rules === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(rules)) {
+    throw new Error("Invalid requestHeaderRules: expected an array.");
+  }
+
+  return rules.map((rule, index) => {
+    if (rule === null || typeof rule !== "object" || Array.isArray(rule)) {
+      throw new Error(`Invalid requestHeaderRules rule at index ${index}: expected an object.`);
+    }
+
+    return {
+      url: compileRegex(rule.url, `requestHeaderRules url at index ${index}`),
+      methods: normalizeRequestHeaderRuleMethods(rule.methods, index),
+      overrideClientHeaders: normalizeRequestHeaderRuleOverride(
+        rule.overrideClientHeaders,
+        index,
+      ),
+      headers: normalizeRequestHeaders(rule.headers, index),
+    };
+  });
+}
+
+function normalizeRequestHeaderRuleMethods(
+  methods: RequestHeaderRuleConfig["methods"],
+  index: number,
+): string[] {
+  if (!Array.isArray(methods) || methods.length === 0) {
+    throw new Error(`Invalid requestHeaderRules methods at index ${index}: expected a non-empty array.`);
+  }
+
+  return methods.map((method) => {
+    if (typeof method !== "string" || method.trim() === "") {
+      throw new Error(`Invalid requestHeaderRules methods at index ${index}: expected string values.`);
+    }
+    return method.trim().toUpperCase();
+  });
+}
+
+function normalizeRequestHeaderRuleOverride(
+  overrideClientHeaders: RequestHeaderRuleConfig["overrideClientHeaders"],
+  index: number,
+): boolean {
+  if (overrideClientHeaders === undefined) {
+    return false;
+  }
+  if (typeof overrideClientHeaders !== "boolean") {
+    throw new Error(`Invalid requestHeaderRules overrideClientHeaders at index ${index}: expected a boolean.`);
+  }
+  return overrideClientHeaders;
+}
+
+function normalizeRequestHeaders(
+  headers: RequestHeaderRuleConfig["headers"],
+  index: number,
+): Record<string, string> {
+  if (headers === null || typeof headers !== "object" || Array.isArray(headers)) {
+    throw new Error(`Invalid requestHeaderRules headers at index ${index}: expected an object.`);
+  }
+
+  const entries = Object.entries(headers);
+  if (entries.length === 0) {
+    throw new Error(`Invalid requestHeaderRules headers at index ${index}: expected a non-empty object.`);
+  }
+
+  const normalizedHeaders: Record<string, string> = {};
+  for (const [name, value] of entries) {
+    const normalizedName = name.toLowerCase();
+    if (DISALLOWED_REQUEST_HEADERS.has(normalizedName)) {
+      throw new Error(
+        `Invalid requestHeaderRules header "${name}": hop-by-hop, framing, and encoding headers are not configurable.`,
+      );
+    }
+
+    if (typeof value !== "string") {
+      throw new Error(`Invalid requestHeaderRules header "${name}": expected a string value.`);
+    }
+
+    try {
+      new Headers({ [name]: value });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid requestHeaderRules header "${name}": ${message}`);
+    }
+
+    normalizedHeaders[normalizedName] = value;
+  }
+
+  return normalizedHeaders;
 }
 
 function normalizeLocalRejectionResponse(
@@ -244,11 +380,15 @@ function resolveTargetUrl(
 
 function matchesAny(patterns: RegExp[], value: string): boolean {
   return patterns.some((pattern) => {
-    pattern.lastIndex = 0;
-    const matches = pattern.test(value);
-    pattern.lastIndex = 0;
-    return matches;
+    return matchesRegex(pattern, value);
   });
+}
+
+function matchesRegex(pattern: RegExp, value: string): boolean {
+  pattern.lastIndex = 0;
+  const matches = pattern.test(value);
+  pattern.lastIndex = 0;
+  return matches;
 }
 
 function isAllowedByRules(
@@ -295,6 +435,29 @@ function isUserAgentAllowed(
     "Blocked by User-Agent denylist.",
     "User-Agent not permitted by allowlist.",
   );
+}
+
+function applyRequestHeaderRules(
+  headers: Headers,
+  rules: NormalizedRequestHeaderRule[],
+  targetUrl: URL,
+  method: string,
+  clientHeaderNames: Set<string>,
+): void {
+  const normalizedMethod = method.toUpperCase();
+  for (const rule of rules) {
+    if (!rule.methods.includes(normalizedMethod) || !matchesRegex(rule.url, targetUrl.href)) {
+      continue;
+    }
+
+    for (const [name, value] of Object.entries(rule.headers)) {
+      if (!rule.overrideClientHeaders && clientHeaderNames.has(name)) {
+        continue;
+      }
+      headers.set(name, value);
+      clientHeaderNames.delete(name);
+    }
+  }
 }
 
 function textResponse(
@@ -442,14 +605,24 @@ export function createProxyFetchHandler(
       return response;
     }
 
+    const clientHeaderNames = new Set(request.headers.keys());
     const headers = new Headers(request.headers);
     for (const header of HOP_BY_HOP_HEADERS) {
       headers.delete(header);
+      clientHeaderNames.delete(header);
     }
     headers.set("x-forwarded-host", requestUrl.host);
     headers.set("x-forwarded-proto", requestUrl.protocol.replace(":", ""));
     // Avoid compressed upstream responses to keep headers/body consistent.
     headers.delete("accept-encoding");
+    clientHeaderNames.delete("accept-encoding");
+    applyRequestHeaderRules(
+      headers,
+      config.requestHeaderRules,
+      targetUrl,
+      request.method,
+      clientHeaderNames,
+    );
 
     try {
       const upstream = await fetchImpl(targetUrl, {
